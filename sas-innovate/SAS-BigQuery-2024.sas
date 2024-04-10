@@ -1,19 +1,11 @@
-/* Macro to display the trace files */
-%macro displayTrace(logfile=/gelcontent/data/LOG/bq.log) ;
-   /* Display trace */
-   %global nblines ;
-   data _null_ ;
-      infile "&logfile" end=eof ;
-      input ;
-      if index(_infile_,"SQL:")>0 and _n_ > &nblines then put _infile_ ;
-      if eof then call symput("nblines",strip(put(_n_,15.))) ;
-   run ;
-%mend ;
+/* Define some utility macros and set some variables */
+filename prolog filesrvc folderpath="/Public" filename="SAS-BigQuery-prolog-2024.sas" ;
+%include prolog ;
 
 /* Connect to BigQuery */
-libname sasbq bigquery cred_path="/gelcontent/keys/gel-sas-user.json"
+libname sasbq bigquery cred_path="&credpath"
    project="sas-gelsandbox" schema="sas_innovate" sql_functions=all
-   driver_trace=sql driver_tracefile="/gelcontent/data/LOG/bq.log"
+   driver_trace=sql driver_tracefile="&logfilename"
    driver_traceoptions=timestamp ;
 
 /* List BigQuery tables/views */
@@ -22,14 +14,16 @@ quit ;
 
 /* See the SQL sent by SAS to BigQuery */
 options sastrace=',,,d' sastraceloc=saslog nostsuffix msglevel=i ;
-%let nblines=0 ;
 %displayTrace ;
 
 /* Default value for SQLGENERATION - BIGQUERY is present */
 proc options option=SQLGENERATION ;
 run ;
 
+
+/****************/
 /* SQL Pushdown */
+/****************/
 
 /* Process a table - look at the log for in-database pushdown */
 proc means data=sasbq.yellow_taxi_trips sum ;
@@ -44,7 +38,10 @@ proc freq data=sasbq.yellow_taxi_trips ;
 run ;
 %displayTrace ;
 
+
+/*****************************/
 /* SQL Implicit pass-through */
+/*****************************/
 
 /* Drop if exists */
 proc datasets lib=sasbq nowarn nolist ;
@@ -68,7 +65,9 @@ quit ;
 %displayTrace ;
 
 
-/* Explicit pass-through */
+/*****************************/
+/* SQL Explicit pass-through */
+/*****************************/
 
 /* Drop if exists */
 proc sql ;
@@ -102,12 +101,16 @@ proc sql ;
 quit ;
 %displayTrace ;
 
+
+/*************************/
 /* Extract BigQuery data */
+/*************************/
 
 /* yellow_taxi_trips has 38,208,084 records */
 /* Default - would expect 11 hours to download the entire table */
+/* scanstringcolumns=yes - XXX to download the entire table */
 data extract ;
-   set sasbq.yellow_taxi_trips(obs=25000) ;
+   set sasbq.yellow_taxi_trips(obs=25000 scanstringcolumns=yes) ;
 run ;
 %displayTrace ;
 
@@ -116,21 +119,24 @@ run ;
 /*    SCANSTRINGCOLUMNS=YES: scan all STRING and BYTE columns to determine the */
 /*                           actual maximum length of the columns before loading data */
 /*    IGNORE_FEDSQL_OBJECTS=YES */
-
+/* yellow_taxi_trips has 38,208,084 records */
 /* Ran in 4:31.23 to download the entire table */
 data extract ;
    set sasbq.yellow_taxi_trips(obs=25000 mode=performance) ;
 run ;
 %displayTrace ;
 
+
+/*******************************/
 /* Load SAS data into BigQuery */
+/*******************************/
 
 /* Drop if exists */
 proc datasets lib=sasbq nowarn nolist ;
    delete yt_extract ;
 quit ;
 /* Load in BigQuery */
-proc append base=sasbq.yt_extract data=extract(obs=1000) ;
+proc append base=sasbq.yt_extract data=extract(obs=500) ;
 run ;
 %displayTrace ;
 
@@ -143,9 +149,68 @@ proc datasets lib=sasbq nowarn nolist ;
 quit ;
 /* Load in BigQuery */
 options sastrace=off ;
-proc append base=sasbq.yt_extract(bulkload=yes) data=extract(obs=1000) ;
+proc append base=sasbq.yt_extract(bulkload=yes) data=extract ;
 run ;
 %displayTrace ;
 options sastrace=",,,d" ;
 
 
+/*******/
+/* CAS */
+/*******/
+
+cas mysession ;
+
+/* Drop caslib if exists */
+proc cas ;
+   action table.dropCaslib / caslib="casbq" quiet=true ;
+quit ;
+
+/* Define a BigQuery caslib */
+caslib casbq datasource=(srctype="bigquery",credfile="&credpath",
+   project="sas-gelsandbox",schema="sas_innovate",
+   use_information_schema=false,scanstringcolumns=true,readbuff=32767,
+   DRIVER_TRACE="SQL",
+   DRIVER_TRACEFILE="&dclogpath/&sysuserid._sasdcbq_$SAS_CURRENT_HOST.log",
+   DRIVER_TRACEOPTIONS="TIMESTAMP|APPEND") libref=casbq ;
+
+/* List BigQuery tables */
+proc casutil incaslib="casbq" ;
+   list files ;
+quit ;
+
+/* Serial - default */
+/* yellow_taxi_trips has 38,208,084 records */
+/* Ran in 1:05:54.66 to load the entire table in CAS */
+%deleteDCTraceFiles(dclogpath=&dclogpath) ;
+proc casutil incaslib="casbq" outcaslib="casbq" ;
+   load casdata="yellow_taxi_trips" casout="yellow_taxi_trips"
+      where="RatecodeID=4" replace ;
+   list tables ;
+quit ;
+/* Display trace - Analyze the SAS log */
+%displayDCTrace(dclogpath=&dclogpath) ;
+
+/* New option MODE=PERFORMANCE */
+/* Using a new option MODE that sets multiple others: */
+/*    readMode=STORAGE:       use the Storage API for Google to move data into CAS */
+/*    scanStringColumns=TRUE: scan all STRING and BYTE columns to determine the */
+/*                            actual maximum length of the columns before loading data */
+/*    numReadNodes=0:         use all available nodes to load data to CAS */
+/*    numWriteNodes=0:        use all available nodes to write to your data source */
+/*    ignoreFedSQLObjects=TRUE */
+/*    project="" (empty string) */
+/* yellow_taxi_trips has 38,208,084 records */
+/* Ran in 2:56.41 to load the entire table in CAS */
+%deleteDCTraceFiles(dclogpath=&dclogpath) ;
+proc casutil incaslib="casbq" outcaslib="casbq" ;
+   load casdata="yellow_taxi_trips" casout="yellow_taxi_trips"
+      datasourceoptions=(mode="performance")
+      where="passenger_count>=3" replace ;
+   list tables ;
+quit ;
+/* Display trace - Analyze the SAS log */
+%displayDCTrace(dclogpath=&dclogpath) ;
+
+
+cas mysession terminate ;
