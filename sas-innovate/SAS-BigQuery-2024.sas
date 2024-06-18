@@ -25,6 +25,9 @@ options sastrace=',,,d' sastraceloc=saslog nostsuffix msglevel=i ;
 /* Default value for SQLGENERATION - BIGQUERY is present */
 proc options option=SQLGENERATION ;
 run ;
+/* Default value for DBIDIRECTEXEC */
+proc options option=DBIDIRECTEXEC ;
+run ;
 
 
 /****************/
@@ -173,6 +176,8 @@ options sastrace=",,,d" ;
 /*******/
 /*******/
 
+cas mysession ;
+
 /* Drop caslib if exists */
 proc cas ;
    action table.dropCaslib / caslib="casbq" quiet=true ;
@@ -224,9 +229,9 @@ quit ;
 %deleteDCTraceFiles(dclogpath=&dclogpath) ;
 proc casutil incaslib="casbq" outcaslib="casbq" ;
    load casdata="yellow_taxi_trips" casout="yellow_taxi_trips"
-      datasourceoptions=(mode="performance" threadedload=true
-         /* sliceColumn="DOLocationID" */ )
-      where="passenger_count>=3" replace copies=0 ;
+      datasourceoptions=(mode="performance" /* threadedload=true */
+         /* sliceColumn="DOLocationID" */)
+      where="RatecodeID>=4" replace copies=0 ;
    list tables ;
 quit ;
 /* Display trace - Analyze the SAS log */
@@ -292,3 +297,6 @@ proc casutil incaslib="casbq" outcaslib="casbq" ;
    list files ;
 quit ;
 %displayDCTrace(dclogpath=&dclogpath) ;
+
+
+cas mysession terminate ;
